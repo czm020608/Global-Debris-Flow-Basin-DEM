@@ -98,10 +98,12 @@ python code\channel_metrics.py `
   --dem raster\jiangjiagou.tif `
   --flow-dir temp_working_dir\flow_dir.tif `
   --flow-acc temp_working_dir\flow_acc.tif `
+  --watershed temp_working_dir\watershed.tif `
   --start point\google_points\JJG\main_channel_start.txt `
   --outlet point\google_points\JJG\main_channel_outlet.txt `
   --stations point\google_points\JJG\stations.txt `
   --output outputs\JJG\channel_metrics.xlsx `
+  --qa-title JJG `
   --stream-thresholds 500,1000,2000,5000,10000 `
   --snap-radii-m 25,50,100,200,300
 ```
@@ -113,6 +115,13 @@ cells, traces the channel, and selects the combination with the smallest outlet
 trace gap and reasonable snap distance. Stations are not forced onto the channel;
 their nearest channel point and station-channel offset are reported instead.
 
+The script also writes two QA figures by default:
+
+- `QA_Figures/channel_longitudinal_profile.png`: channel elevation profile.
+- `QA_Figures/dem_hydrology_qa.png`: DEM background with watershed overlay, traced channel, outlet, start, and station points.
+
+Use `--qa-dir outputs\JJG\QA_Figures` to choose a different figure directory.
+
 One-step point conversion plus metric calculation:
 
 ```powershell
@@ -121,6 +130,7 @@ python code\run_basin_workflow.py `
   --dem raster\jiangjiagou.tif `
   --flow-dir temp_working_dir\flow_dir.tif `
   --flow-acc temp_working_dir\flow_acc.tif `
+  --watershed temp_working_dir\watershed.tif `
   --output-root outputs\basins `
   --stream-thresholds 500,1000,2000,5000,10000 `
   --snap-radii-m 25,50,100,200,300
@@ -132,6 +142,7 @@ Excel sheets:
 - `Channel_Profile`: per-cell channel profile with distance, coordinates, elevation, segment slope, and flow accumulation.
 - `Station_Metrics`: nearest channel position, station-channel offset, manual-review flag, 100 m window slope, and DEM-derived width.
 - `Parameter_Search`: all tested `threshold` and `snap_dist` combinations, including failed candidates and the selected-candidate diagnostics.
+- QA PNG figures are saved next to the Excel output, and their file paths are recorded in `Summary`.
 
 ## 6. Validation checklist
 

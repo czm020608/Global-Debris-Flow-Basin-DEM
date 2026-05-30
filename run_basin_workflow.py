@@ -29,6 +29,7 @@ def main() -> None:
     parser.add_argument("--dem", required=True, type=Path, help="Projected DEM in the basin analysis CRS.")
     parser.add_argument("--flow-dir", required=True, type=Path, help="D8 flow direction raster aligned with DEM.")
     parser.add_argument("--flow-acc", required=True, type=Path, help="Flow accumulation raster aligned with DEM.")
+    parser.add_argument("--watershed", type=Path, help="Optional watershed raster aligned with DEM for QA map overlay.")
     parser.add_argument("--output-root", default=Path("outputs/basins"), type=Path)
     parser.add_argument("--target-crs", default="dem", help="dem, auto, or explicit projected CRS such as EPSG:32648.")
     parser.add_argument("--snap-radius-m", default=100.0, type=float)
@@ -77,6 +78,9 @@ def main() -> None:
             args.station_offset_review_m,
             parse_float_list(args.stream_thresholds, [500.0, 1000.0, 2000.0, 5000.0, 10000.0]),
             parse_float_list(args.snap_radii_m, [args.snap_radius_m]),
+            metrics_root / basin_id / "QA_Figures",
+            args.watershed,
+            basin_id,
         )
         print(f"{basin_id}: wrote {output_path}")
 

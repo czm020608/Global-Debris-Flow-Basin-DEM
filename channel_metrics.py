@@ -21,6 +21,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import rasterio
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from openpyxl import load_workbook
 from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -458,6 +462,78 @@ def station_metrics(
     return pd.DataFrame.from_records(rows)
 
 
+def point_to_xy(point: PointRecord) -> tuple[float, float]:
+    return float(point.x), float(point.y)
+
+
+def plot_profile_qa(profile: pd.DataFrame, output_path: Path, title: str) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=160)
+    ax.plot(profile["distance_m"], profile["elevation_m"], color="#1f77b4", linewidth=2, label="main_channel")
+    ax.set_title(title)
+    ax.set_xlabel("Distance from start (m)")
+    ax.set_ylabel("Elevation (m)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def plot_hydrology_qa(
+    dem: np.ndarray,
+    transform,
+    dem_crs: str,
+    profile: pd.DataFrame,
+    start: PointRecord,
+    outlet: PointRecord,
+    stations: list[PointRecord],
+    output_path: Path,
+    title: str,
+    watershed: np.ndarray | None = None,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    rows, cols = dem.shape
+    left, top = xy(transform, 0, 0, offset="ul")
+    right, bottom = xy(transform, rows - 1, cols - 1, offset="lr")
+    extent = [left, right, bottom, top]
+
+    dem_plot = np.ma.masked_invalid(dem)
+    fig, ax = plt.subplots(figsize=(9, 7), dpi=160)
+    image = ax.imshow(dem_plot, extent=extent, cmap="terrain", origin="upper", alpha=0.92)
+    fig.colorbar(image, ax=ax, fraction=0.035, pad=0.02, label="Elevation (m)")
+
+    if watershed is not None:
+        watershed_mask = np.ma.masked_where(~np.isfinite(watershed) | (watershed <= 0), watershed)
+        ax.imshow(watershed_mask, extent=extent, cmap="Blues", origin="upper", alpha=0.18)
+
+    ax.plot(profile["X"], profile["Y"], color="#0b3d91", linewidth=2.2, label="traced channel")
+    sx, sy = point_to_xy(start)
+    ox, oy = point_to_xy(outlet)
+    ax.scatter([sx], [sy], marker="^", s=42, color="#d62728", edgecolor="black", linewidth=0.4, zorder=5)
+    ax.text(sx, sy, f" {start.point_id}", fontsize=8, va="bottom")
+    ax.scatter([ox], [oy], marker="s", s=36, color="#9ecae1", edgecolor="black", linewidth=0.5, zorder=5)
+    ax.text(ox, oy, f" {outlet.point_id}", fontsize=8, va="bottom")
+
+    if stations:
+        station_x = [station.x for station in stations]
+        station_y = [station.y for station in stations]
+        ax.scatter(station_x, station_y, marker="o", s=34, color="#ffae42", edgecolor="black", linewidth=0.4, zorder=5)
+        for station in stations:
+            ax.text(station.x, station.y, f" {station.point_id}", fontsize=8, va="bottom")
+
+    crs_label = dem_crs.replace("EPSG:", "EPSG:") if dem_crs else "unknown CRS"
+    ax.set_title(f"{title} DEM hydrology QA ({crs_label})")
+    ax.set_xlabel("Easting (m)")
+    ax.set_ylabel("Northing (m)")
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 def summary_metrics(profile: pd.DataFrame, cell_area_m2: float) -> pd.DataFrame:
     slopes = profile["segment_slope"].replace([np.inf, -np.inf], np.nan)
     steep_idx = int(slopes.idxmax()) if slopes.notna().any() else 0
@@ -576,6 +652,9 @@ def compute_metrics(
     station_offset_review_m: float,
     stream_thresholds: list[float] | None = None,
     snap_radii_m: list[float] | None = None,
+    qa_dir: Path | None = None,
+    watershed_path: Path | None = None,
+    qa_title: str | None = None,
 ) -> Path:
     starts = read_points(start_path)
     outlets = read_points(outlet_path)
@@ -600,6 +679,14 @@ def compute_metrics(
         dem_crs = str(dem_src.crs)
         cellsize_x, cellsize_y = dem_src.res
         cell_area_m2 = abs(transform.a * transform.e)
+    watershed = None
+    if watershed_path and watershed_path.exists():
+        with rasterio.open(watershed_path) as watershed_src:
+            if str(watershed_src.crs) != dem_crs:
+                raise ValueError("Watershed raster CRS does not match DEM CRS.")
+            if watershed_src.transform != transform:
+                raise ValueError("Watershed raster transform does not match DEM transform.")
+            watershed = watershed_src.read(1)
 
     thresholds = stream_thresholds or [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
     radii = snap_radii_m or [snap_radius_m]
@@ -679,6 +766,21 @@ def compute_metrics(
                 "dem_cross_section_width_m",
             ]
         )
+    figure_dir = qa_dir or (output_path.parent / "QA_Figures")
+    title = qa_title or output_path.parent.name or "Basin"
+    profile_png = figure_dir / "channel_longitudinal_profile.png"
+    map_png = figure_dir / "dem_hydrology_qa.png"
+    plot_profile_qa(profile, profile_png, f"{title} channel longitudinal profile")
+    plot_hydrology_qa(dem, transform, dem_crs, profile, starts[0], outlets[0], station_points, map_png, title, watershed)
+
+    figure_summary = pd.DataFrame(
+        [
+            ("qa_profile_png", str(profile_png)),
+            ("qa_map_png", str(map_png)),
+        ],
+        columns=["metric", "value"],
+    )
+    summary = pd.concat([summary, figure_summary], ignore_index=True)
     write_excel(output_path, summary, profile, stations, optimization)
     return output_path
 
@@ -688,10 +790,13 @@ def main() -> None:
     parser.add_argument("--dem", default=Path("raster/jiangjiagou.tif"), type=Path)
     parser.add_argument("--flow-dir", default=Path("temp_working_dir/flow_dir.tif"), type=Path)
     parser.add_argument("--flow-acc", default=Path("temp_working_dir/flow_acc.tif"), type=Path)
+    parser.add_argument("--watershed", type=Path, help="Optional watershed raster aligned with DEM for QA map overlay.")
     parser.add_argument("--start", required=True, type=Path, help="TXT/CSV with one main-channel start point: ID,X,Y")
     parser.add_argument("--outlet", required=True, type=Path, help="TXT/CSV with one outlet point: ID,X,Y")
     parser.add_argument("--stations", type=Path, help="TXT/CSV station file: ID,X,Y,Z(optional)")
     parser.add_argument("--output", default=Path("outputs/channel_metrics.xlsx"), type=Path)
+    parser.add_argument("--qa-dir", type=Path, help="Directory for QA PNG figures. Default: output Excel folder/QA_Figures.")
+    parser.add_argument("--qa-title", help="Title prefix for QA figures, for example basin name.")
     parser.add_argument("--snap-radius-m", default=100.0, type=float)
     parser.add_argument(
         "--stream-thresholds",
@@ -726,6 +831,9 @@ def main() -> None:
         args.station_offset_review_m,
         parse_float_list(args.stream_thresholds, [500.0, 1000.0, 2000.0, 5000.0, 10000.0]),
         parse_float_list(args.snap_radii_m, [args.snap_radius_m]),
+        args.qa_dir,
+        args.watershed,
+        args.qa_title,
     )
     print(f"Wrote {output}")
 

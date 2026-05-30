@@ -104,16 +104,29 @@ python code\channel_metrics.py `
   --stations point\google_points\JJG\stations.txt `
   --output outputs\JJG\channel_metrics.xlsx `
   --qa-title JJG `
+  --outlet-max-snap-m 150 `
   --stream-thresholds 500,1000,2000,5000,10000 `
   --snap-radii-m 25,50,100,200,300
 ```
 
 Google Maps start/outlet points often do not fall exactly on the DEM-derived
 channel. The script therefore tests each `stream threshold x snap distance`
-combination, snaps only the `main_start` and `outlet` points to nearby stream
-cells, traces the channel, and selects the combination with the smallest outlet
-trace gap and reasonable snap distance. Stations are not forced onto the channel;
-their nearest channel point and station-channel offset are reported instead.
+combination, snaps the `main_start` point to nearby stream cells, traces the
+DEM-derived main channel downstream, and then chooses the point on that traced
+main channel that is closest to the input outlet.
+
+Outlet handling uses `--outlet-max-snap-m`:
+
+- If the input outlet is within this distance from the traced main channel, the
+  nearest channel point is used and marked as `snapped`.
+- If the input outlet is farther away, the nearest point on the traced main
+  channel is still adopted as the calculation outlet and marked as `relocated`.
+- The old outlet, adopted outlet, and old-to-new distance are written to Excel
+  so the difference between the modern map outlet and older DEM channel can be
+  reviewed.
+
+Stations are not forced onto the channel; their nearest channel point and
+station-channel offset are reported instead.
 
 The script also writes two QA figures by default:
 
@@ -132,13 +145,14 @@ python code\run_basin_workflow.py `
   --flow-acc temp_working_dir\flow_acc.tif `
   --watershed temp_working_dir\watershed.tif `
   --output-root outputs\basins `
+  --outlet-max-snap-m 150 `
   --stream-thresholds 500,1000,2000,5000,10000 `
   --snap-radii-m 25,50,100,200,300
 ```
 
 Excel sheets:
 
-- `Summary`: CRS, raster resolution, selected stream threshold, selected snap distance, D8 scheme, trace gap, channel length/drop/slope, steepest and gentlest positions, drainage area.
+- `Summary`: CRS, raster resolution, selected stream threshold, selected snap distance, D8 scheme, outlet adjustment mode, input/adopted outlet coordinates, input-to-adopted outlet distance, channel length/drop/slope, steepest and gentlest positions, drainage area.
 - `Channel_Profile`: per-cell channel profile with distance, coordinates, elevation, segment slope, and flow accumulation.
 - `Station_Metrics`: nearest channel position, station-channel offset, manual-review flag, 100 m window slope, and DEM-derived width.
 - `Parameter_Search`: all tested `threshold` and `snap_dist` combinations, including failed candidates and the selected-candidate diagnostics.
@@ -147,7 +161,7 @@ Excel sheets:
 ## 6. Validation checklist
 
 - Load `projected_points.txt` in QGIS with CRS equal to the DEM analysis CRS.
-- Confirm start/outlet points can be snapped to the intended channel by checking `selected_stream_threshold_cells`, `selected_snap_dist_m`, `start_snap_distance_m`, and `outlet_snap_distance_m`.
+- Confirm start/outlet handling by checking `selected_stream_threshold_cells`, `selected_snap_dist_m`, `start_snap_distance_m`, `outlet_adjustment`, `outlet_input_to_adopted_distance_m`, and `outlet_max_snap_threshold_m`.
 - Do not require stations to fall on the channel unless field notes explicitly say so; inspect `station_to_channel_offset_m` and `needs_manual_review`.
 - Confirm DEM, `flow_dir.tif`, and `flow_acc.tif` have matching CRS and grid.
 - Inspect `traced_end_to_outlet_gap_m` in `Summary`; large values mean the outlet point or snap radius needs review.

@@ -75,6 +75,8 @@ class TraceCandidate:
     selected_scheme: str | None
     score: float | None
     status: str
+    outlet_adjustment: str | None = None
+    adopted_outlet_distance_m: float | None = None
     path: list[tuple[int, int]] | None = None
 
 
@@ -193,7 +195,7 @@ def trace_downstream(
         if nr < 0 or nr >= rows or nc < 0 or nc >= cols:
             break
         if (nr, nc) in seen:
-            raise ValueError(f"Flow path loop detected at row={nr}, col={nc}")
+            break
         path.append((nr, nc))
         seen.add((nr, nc))
         r, c = nr, nc
@@ -224,6 +226,53 @@ def trace_downstream_auto(
     return path, scheme
 
 
+def trace_downstream_to_end(
+    start_rc: tuple[int, int],
+    flow_dir: np.ndarray,
+    pointer_scheme: str,
+    max_steps: int = 200000,
+) -> list[tuple[int, int]]:
+    mapping = WHITEBOX_D8 if pointer_scheme == "whitebox" else ESRI_D8
+    rows, cols = flow_dir.shape
+    path = [start_rc]
+    seen = {start_rc}
+    r, c = start_rc
+
+    for _ in range(max_steps):
+        direction = int(flow_dir[r, c])
+        if direction == 0:
+            break
+        if direction not in mapping:
+            raise ValueError(f"Unexpected D8 direction value {direction} at row={r}, col={c}")
+        dr, dc = mapping[direction]
+        nr, nc = r + dr, c + dc
+        if nr < 0 or nr >= rows or nc < 0 or nc >= cols:
+            break
+        if (nr, nc) in seen:
+            break
+        path.append((nr, nc))
+        seen.add((nr, nc))
+        r, c = nr, nc
+    return path
+
+
+def nearest_path_cell_to_point(
+    path: list[tuple[int, int]],
+    transform,
+    point: PointRecord,
+) -> tuple[int, tuple[int, int], float]:
+    if not path:
+        raise ValueError("Cannot choose an outlet from an empty channel path.")
+    rows = [rc[0] for rc in path]
+    cols = [rc[1] for rc in path]
+    xs, ys = xy(transform, rows, cols, offset="center")
+    dx = np.asarray(xs, dtype=float) - point.x
+    dy = np.asarray(ys, dtype=float) - point.y
+    distances = np.hypot(dx, dy)
+    best = int(np.nanargmin(distances))
+    return best, path[best], float(distances[best])
+
+
 def evaluate_trace_candidates(
     start: PointRecord,
     outlet: PointRecord,
@@ -233,6 +282,7 @@ def evaluate_trace_candidates(
     stream_thresholds: list[float],
     snap_radii_m: list[float],
     pointer_scheme: str,
+    outlet_max_snap_m: float,
 ) -> tuple[TraceCandidate, pd.DataFrame]:
     cell = (abs(transform.a) + abs(transform.e)) / 2
     candidates: list[TraceCandidate] = []
@@ -240,11 +290,41 @@ def evaluate_trace_candidates(
         for snap_radius_m in snap_radii_m:
             try:
                 start_rc, start_snap_m = snap_to_stream_cell(flow_acc, transform, start, threshold, snap_radius_m)
-                outlet_rc, outlet_snap_m = snap_to_stream_cell(flow_acc, transform, outlet, threshold, snap_radius_m)
-                path, selected_scheme = trace_downstream_auto(start_rc, outlet_rc, flow_dir, pointer_scheme)
-                outlet_gap_cells = math.hypot(path[-1][0] - outlet_rc[0], path[-1][1] - outlet_rc[1])
-                traced_gap_m = outlet_gap_cells * cell
-                score = traced_gap_m + 0.25 * (start_snap_m + outlet_snap_m)
+                schemes = ["whitebox", "esri"] if pointer_scheme == "auto" else [pointer_scheme]
+                traced_options = []
+                for scheme in schemes:
+                    full_path = trace_downstream_to_end(start_rc, flow_dir, scheme)
+                    outlet_idx, outlet_rc, outlet_snap_m = nearest_path_cell_to_point(full_path, transform, outlet)
+                    path = full_path[: outlet_idx + 1]
+                    outlet_adjustment = "snapped" if outlet_snap_m <= outlet_max_snap_m else "relocated"
+                    traced_gap_m = 0.0
+                    relocation_penalty = 0.0 if outlet_adjustment == "snapped" else outlet_max_snap_m
+                    score = 0.25 * start_snap_m + outlet_snap_m + relocation_penalty
+                    if len(path) < 2:
+                        score += 1e9
+                    traced_options.append(
+                        (
+                            score,
+                            outlet_snap_m,
+                            -len(path),
+                            path,
+                            scheme,
+                            outlet_rc,
+                            outlet_adjustment,
+                            traced_gap_m,
+                        )
+                    )
+                traced_options.sort(key=lambda item: (item[0], item[1], item[2]))
+                (
+                    score,
+                    outlet_snap_m,
+                    _negative_cells,
+                    path,
+                    selected_scheme,
+                    outlet_rc,
+                    outlet_adjustment,
+                    traced_gap_m,
+                ) = traced_options[0]
                 if len(path) < 2:
                     score += 1e9
                 candidates.append(
@@ -260,6 +340,8 @@ def evaluate_trace_candidates(
                         selected_scheme=selected_scheme,
                         score=score,
                         status="ok",
+                        outlet_adjustment=outlet_adjustment,
+                        adopted_outlet_distance_m=outlet_snap_m,
                         path=path,
                     )
                 )
@@ -277,6 +359,8 @@ def evaluate_trace_candidates(
                         selected_scheme=None,
                         score=None,
                         status=str(exc),
+                        outlet_adjustment=None,
+                        adopted_outlet_distance_m=None,
                     )
                 )
 
@@ -318,6 +402,8 @@ def trace_candidates_dataframe(candidates: list[TraceCandidate]) -> pd.DataFrame
                 "traced_cells": candidate.traced_cells,
                 "selected_d8_pointer_scheme": candidate.selected_scheme,
                 "score": candidate.score,
+                "outlet_adjustment": candidate.outlet_adjustment,
+                "adopted_outlet_distance_from_input_m": candidate.adopted_outlet_distance_m,
                 "status": candidate.status,
             }
         )
@@ -488,6 +574,7 @@ def plot_hydrology_qa(
     profile: pd.DataFrame,
     start: PointRecord,
     outlet: PointRecord,
+    adopted_outlet: PointRecord,
     stations: list[PointRecord],
     output_path: Path,
     title: str,
@@ -511,10 +598,13 @@ def plot_hydrology_qa(
     ax.plot(profile["X"], profile["Y"], color="#0b3d91", linewidth=2.2, label="traced channel")
     sx, sy = point_to_xy(start)
     ox, oy = point_to_xy(outlet)
+    aox, aoy = point_to_xy(adopted_outlet)
     ax.scatter([sx], [sy], marker="^", s=42, color="#d62728", edgecolor="black", linewidth=0.4, zorder=5)
     ax.text(sx, sy, f" {start.point_id}", fontsize=8, va="bottom")
-    ax.scatter([ox], [oy], marker="s", s=36, color="#9ecae1", edgecolor="black", linewidth=0.5, zorder=5)
-    ax.text(ox, oy, f" {outlet.point_id}", fontsize=8, va="bottom")
+    ax.scatter([ox], [oy], marker="x", s=52, color="#111111", linewidth=1.0, zorder=5, label="input outlet")
+    ax.text(ox, oy, f" {outlet.point_id}_input", fontsize=8, va="bottom")
+    ax.scatter([aox], [aoy], marker="s", s=36, color="#9ecae1", edgecolor="black", linewidth=0.5, zorder=6)
+    ax.text(aox, aoy, f" {adopted_outlet.point_id}", fontsize=8, va="bottom")
 
     if stations:
         station_x = [station.x for station in stations]
@@ -565,6 +655,10 @@ def validation_metrics(
     snap_radius_m: float,
     start_snap_m: float,
     outlet_snap_m: float,
+    outlet_adjustment: str,
+    outlet_max_snap_m: float,
+    input_outlet: PointRecord,
+    adopted_outlet: PointRecord,
     tested_candidate_count: int,
     slope_window_m: float,
     bank_relief_m: float,
@@ -582,10 +676,16 @@ def validation_metrics(
         ("outlet_row_col", f"{outlet_rc[0]},{outlet_rc[1]}"),
         ("traced_end_row_col", f"{traced_outlet_rc[0]},{traced_outlet_rc[1]}"),
         ("traced_end_to_outlet_gap_m", outlet_gap_cells * mean_cellsize),
+        ("outlet_adjustment", outlet_adjustment),
+        ("outlet_max_snap_threshold_m", outlet_max_snap_m),
         ("selected_stream_threshold_cells", stream_threshold),
         ("selected_snap_dist_m", snap_radius_m),
         ("start_snap_distance_m", start_snap_m),
-        ("outlet_snap_distance_m", outlet_snap_m),
+        ("outlet_input_to_adopted_distance_m", outlet_snap_m),
+        ("input_outlet_X", input_outlet.x),
+        ("input_outlet_Y", input_outlet.y),
+        ("adopted_outlet_X", adopted_outlet.x),
+        ("adopted_outlet_Y", adopted_outlet.y),
         ("tested_threshold_snap_candidates", tested_candidate_count),
         ("station_slope_half_window_m", slope_window_m),
         ("bank_relief_threshold_m", bank_relief_m),
@@ -652,6 +752,7 @@ def compute_metrics(
     station_offset_review_m: float,
     stream_thresholds: list[float] | None = None,
     snap_radii_m: list[float] | None = None,
+    outlet_max_snap_m: float = 150.0,
     qa_dir: Path | None = None,
     watershed_path: Path | None = None,
     qa_title: str | None = None,
@@ -699,6 +800,7 @@ def compute_metrics(
         thresholds,
         radii,
         pointer_scheme,
+        outlet_max_snap_m,
     )
     start_rc = selected.start_rc
     outlet_rc = selected.outlet_rc
@@ -707,6 +809,9 @@ def compute_metrics(
     if start_rc is None or outlet_rc is None or path is None or selected_scheme is None:
         raise ValueError("Selected channel trace candidate is incomplete.")
     profile = path_dataframe(path, dem, flow_acc, transform)
+    adopted_outlet_x = float(profile["X"].iloc[-1])
+    adopted_outlet_y = float(profile["Y"].iloc[-1])
+    adopted_outlet = PointRecord(f"{outlets[0].point_id}_adopted", adopted_outlet_x, adopted_outlet_y)
 
     if len(profile) < 2:
         raise ValueError("The traced channel contains fewer than two cells. Check point locations and D8 pointer scheme.")
@@ -724,6 +829,10 @@ def compute_metrics(
         selected.snap_radius_m,
         float(selected.start_snap_m),
         float(selected.outlet_snap_m),
+        str(selected.outlet_adjustment),
+        outlet_max_snap_m,
+        outlets[0],
+        adopted_outlet,
         len(optimization),
         slope_window_m,
         bank_relief_m,
@@ -771,7 +880,19 @@ def compute_metrics(
     profile_png = figure_dir / "channel_longitudinal_profile.png"
     map_png = figure_dir / "dem_hydrology_qa.png"
     plot_profile_qa(profile, profile_png, f"{title} channel longitudinal profile")
-    plot_hydrology_qa(dem, transform, dem_crs, profile, starts[0], outlets[0], station_points, map_png, title, watershed)
+    plot_hydrology_qa(
+        dem,
+        transform,
+        dem_crs,
+        profile,
+        starts[0],
+        outlets[0],
+        adopted_outlet,
+        station_points,
+        map_png,
+        title,
+        watershed,
+    )
 
     figure_summary = pd.DataFrame(
         [
@@ -798,6 +919,15 @@ def main() -> None:
     parser.add_argument("--qa-dir", type=Path, help="Directory for QA PNG figures. Default: output Excel folder/QA_Figures.")
     parser.add_argument("--qa-title", help="Title prefix for QA figures, for example basin name.")
     parser.add_argument("--snap-radius-m", default=100.0, type=float)
+    parser.add_argument(
+        "--outlet-max-snap-m",
+        default=150.0,
+        type=float,
+        help=(
+            "Maximum distance for treating the input outlet as snapped to the DEM-derived main channel. "
+            "If the nearest main-channel point is farther away, that nearest channel point is adopted as a relocated outlet."
+        ),
+    )
     parser.add_argument(
         "--stream-thresholds",
         default="500,1000,2000,5000,10000",
@@ -831,6 +961,7 @@ def main() -> None:
         args.station_offset_review_m,
         parse_float_list(args.stream_thresholds, [500.0, 1000.0, 2000.0, 5000.0, 10000.0]),
         parse_float_list(args.snap_radii_m, [args.snap_radius_m]),
+        args.outlet_max_snap_m,
         args.qa_dir,
         args.watershed,
         args.qa_title,

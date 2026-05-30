@@ -34,6 +34,15 @@ def main() -> None:
     parser.add_argument("--target-crs", default="dem", help="dem, auto, or explicit projected CRS such as EPSG:32648.")
     parser.add_argument("--snap-radius-m", default=100.0, type=float)
     parser.add_argument(
+        "--outlet-max-snap-m",
+        default=150.0,
+        type=float,
+        help=(
+            "Maximum distance for keeping the input outlet as a snapped outlet. "
+            "Beyond this distance, the nearest point on the DEM-derived main channel is adopted."
+        ),
+    )
+    parser.add_argument(
         "--stream-thresholds",
         default="500,1000,2000,5000,10000",
         help="Comma-separated flow_acc thresholds in cells to test for channel snapping.",
@@ -78,6 +87,7 @@ def main() -> None:
             args.station_offset_review_m,
             parse_float_list(args.stream_thresholds, [500.0, 1000.0, 2000.0, 5000.0, 10000.0]),
             parse_float_list(args.snap_radii_m, [args.snap_radius_m]),
+            args.outlet_max_snap_m,
             metrics_root / basin_id / "QA_Figures",
             args.watershed,
             basin_id,

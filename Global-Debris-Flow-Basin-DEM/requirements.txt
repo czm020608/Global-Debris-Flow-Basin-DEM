@@ -1,0 +1,9 @@
+numpy
+pandas
+rasterio
+matplotlib
+openpyxl
+pyproj
+geopandas
+shapely
+
